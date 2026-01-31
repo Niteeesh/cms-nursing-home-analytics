@@ -1,0 +1,72 @@
+import sys
+from awsglue.utils import getResolvedOptions
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from pyspark.context import SparkContext
+import pyspark.sql.functions as F
+
+# -------------------------------------------------
+# Init
+# -------------------------------------------------
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+# -------------------------------------------------
+# Read RAW MDS Quality table from Glue Catalog
+# -------------------------------------------------
+df = glueContext.create_dynamic_frame.from_catalog(
+    database="cms_nh_raw",
+    table_name="raw_nh_qualitymsr_mds_oct2024_csv"
+).toDF()
+
+# -------------------------------------------------
+# Normalize CCN (Text(6), keep leading zeros)
+# -------------------------------------------------
+df = df.withColumn(
+    "ccn",
+    F.lpad(
+        F.regexp_replace(
+            F.col("CMS Certification Number (CCN)").cast("string"),
+            "[^0-9]",
+            ""
+        ),
+        6,
+        "0"
+    )
+)
+
+# -------------------------------------------------
+# Select, rename, and cast columns
+# -------------------------------------------------
+df = df.select(
+    F.col("ccn"),
+    F.col("State").alias("state"),
+    F.col("Measure Code").cast("int").alias("measure_code"),
+    F.col("Measure Description").alias("measure_description"),
+    F.col("Resident type").alias("resident_type"),
+    F.col("Q1 Measure Score").cast("double").alias("q1_score"),
+    F.col("Q2 Measure Score").cast("double").alias("q2_score"),
+    F.col("Q3 Measure Score").cast("double").alias("q3_score"),
+    F.col("Q4 Measure Score").cast("double").alias("q4_score"),
+    F.col("Four Quarter Average Score").cast("double").alias("four_quarter_avg_score"),
+    F.col("Measure Period").alias("measure_period"),
+    F.to_date(F.col("Processing Date")).alias("processing_date")
+)
+
+# -------------------------------------------------
+# Write SILVER Parquet
+# -------------------------------------------------
+(
+    df.write
+    .mode("overwrite")
+    .format("parquet")
+    .partitionBy("state")
+    .save("s3://cms-nursing-home-analytics/cms_nh/silver/quality_mds/")
+)
+
+job.commit()
