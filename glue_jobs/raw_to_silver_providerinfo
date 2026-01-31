@@ -1,0 +1,77 @@
+import sys
+from awsglue.utils import getResolvedOptions
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from pyspark.context import SparkContext
+import pyspark.sql.functions as F
+
+# -------------------------------------------------
+# Init
+# -------------------------------------------------
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+# -------------------------------------------------
+# Read RAW table from Glue Catalog
+# -------------------------------------------------
+df = glueContext.create_dynamic_frame.from_catalog(
+    database="cms_nh_raw",
+    table_name="raw_nh_providerinfo_oct2024_csv"
+).toDF()
+
+# -------------------------------------------------
+# Normalize CCN (Text(6), keep leading zeros)
+# -------------------------------------------------
+df = df.withColumn(
+    "ccn",
+    F.lpad(
+        F.regexp_replace(
+            F.col("CMS Certification Number (CCN)").cast("string"),
+            "[^0-9]",
+            ""
+        ),
+        6,
+        "0"
+    )
+)
+
+# -------------------------------------------------
+# Select, rename, and cast columns
+# -------------------------------------------------
+df = df.select(
+    F.col("ccn"),
+    F.col("Provider Name").alias("provider_name"),
+    F.col("State").alias("state"),
+    F.col("City/Town").alias("city"),
+    F.col("ZIP Code").cast("int").alias("zip_code"),
+    F.col("Ownership Type").alias("ownership_type"),
+    F.col("Number of Certified Beds").cast("int").alias("certified_beds"),
+    F.col("Average Number of Residents per Day").cast("double").alias("avg_residents_per_day"),
+    F.col("Overall Rating").cast("int").alias("overall_rating"),
+    F.col("Health Inspection Rating").cast("int").alias("health_inspection_rating"),
+    F.col("QM Rating").cast("int").alias("qm_rating"),
+    F.col("Staffing Rating").cast("int").alias("staffing_rating"),
+    F.col("Reported RN Staffing Hours per Resident per Day").cast("double").alias("reported_rn_hours_prpd"),
+    F.col("Reported LPN Staffing Hours per Resident per Day").cast("double").alias("reported_lpn_hours_prpd"),
+    F.col("Reported Nurse Aide Staffing Hours per Resident per Day").cast("double").alias("reported_aide_hours_prpd"),
+    F.col("Reported Total Nurse Staffing Hours per Resident per Day").cast("double").alias("reported_total_hours_prpd"),
+    F.to_date(F.col("Processing Date")).alias("processing_date")
+)
+
+# -------------------------------------------------
+# Write SILVER Parquet
+# -------------------------------------------------
+(
+    df.write
+    .mode("overwrite")
+    .format("parquet")
+    .partitionBy("state")
+    .save("s3://cms-nursing-home-analytics/cms_nh/silver/providerinfo/")
+)
+
+job.commit()
